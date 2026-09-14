@@ -14,8 +14,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  APP_IMAGE: ghcr.io/pku-typst/toss
-  LATEX_WORKER_IMAGE: ghcr.io/pku-typst/toss-latex-worker
+  APP_IMAGE: ghcr.io/${{ github.repository }}
+  LATEX_WORKER_IMAGE: ghcr.io/${{ github.repository }}-latex-worker
 
 jobs:
   application:
