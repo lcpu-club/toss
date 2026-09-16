@@ -222,10 +222,7 @@ fn identity_profile(claims: &CoreIdTokenClaims, subject: &str) -> IdentityProfil
         .preferred_username()
         .map(|value| value.to_string())
         .unwrap_or_else(|| "OIDC User".to_string());
-    let username_seed = claims
-        .preferred_username()
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| username_seed_from_email(&email));
+    let username_seed = username_seed_from_email(&email);
     IdentityProfile {
         email,
         display_name,
