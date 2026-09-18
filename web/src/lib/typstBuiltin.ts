@@ -260,3 +260,27 @@ export async function loadBuiltinTypst(options: {
     createLocalPackageRegistry: (accessModel) => new LocalPackageRegistry(accessModel, loadedPackages)
   };
 }
+
+/** A third-party package hint for editor intelligence (import "@..." completion). */
+export type TypstPackageHint = {
+  /** Full package specification, e.g. `@preview/example:0.1.0`. */
+  spec: string;
+  /** Optional one-line description shown as completion detail. */
+  description?: string;
+};
+
+/**
+ * The exact set of third-party packages the platform resolves, as editor
+ * hints. Only seeded/local catalog packages are advertised — the dynamic
+ * proxy can fetch arbitrary packages but has no enumerable index, so it
+ * must not drive completion.
+ */
+export function packageCatalogHints(catalog: BuiltinTypstCatalog): TypstPackageHint[] {
+  const hints: TypstPackageHint[] = [];
+  for (const entry of [...catalog.local_packages, ...catalog.universe_seeds]) {
+    hints.push({
+      spec: `@${entry.namespace}/${entry.name}:${entry.version}`
+    });
+  }
+  return hints;
+}

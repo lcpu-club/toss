@@ -11,6 +11,7 @@ import {
 } from "@myriaddreamin/typst.ts/options.init";
 import {
   loadBuiltinTypst,
+  packageCatalogHints,
   type BuiltinFontProfile,
   type LoadedBuiltinTypst
 } from "@/lib/typstBuiltin";
@@ -27,7 +28,8 @@ import {
   mapDocumentToSource,
   mapSourceToDocument,
   type TypstMappingRequest,
-  type TypstMappingResponse
+  type TypstMappingResponse,
+  utf16OffsetToUtf8ByteOffset
 } from "@/lib/typstSync";
 import { loadBrowserFonts } from "@/lib/typstFontLoader";
 import type { CompilationEnvironment } from "@/compilation/compilationEnvironment";
@@ -58,8 +60,55 @@ type PrewarmRequest = {
   fontProfile: BuiltinFontProfile;
 };
 
+type IdeCompletionItem = {
+  kind: string;
+  label: string;
+  apply?: string;
+  detail?: string;
+};
+
+type IdeRequest =
+  | {
+      kind: "ide.autocomplete";
+      id: number;
+      workspaceKey: string;
+      /** The workspace's entry file (same convention as compile requests). */
+      entryFilePath: string;
+      file: string;
+      /** UTF-16 code unit offset, as produced by the editor. */
+      cursor: number;
+      explicit: boolean;
+      /** Latest editor content for the file, so the shadow VFS can be
+       *  refreshed when no compile has applied it yet. */
+      content: string;
+    }
+  | {
+      kind: "ide.tooltip";
+      id: number;
+      workspaceKey: string;
+      entryFilePath: string;
+      file: string;
+      cursor: number;
+      /** 0 = before the cursor, 1 = after. */
+      side: 0 | 1;
+      content: string;
+    };
+
+/** Latest requested IDE request per file, so stale responses can be dropped. */
+let latestIdeRequest = new Map<string, number>();
+
+type IdeResponse = {
+  kind: "ide.result";
+  id: number;
+  ok: boolean;
+  /** Present when the IDE call produced a value. */
+  completion?: { from: number; completions: IdeCompletionItem[] };
+  tooltip?: { kind: "text" | "code"; value: string };
+  error?: string;
+};
+
 type CompileQueueRequest = CompileRequest | PrewarmRequest;
-type WorkerRequest = CompileQueueRequest | TypstMappingRequest;
+type WorkerRequest = CompileQueueRequest | TypstMappingRequest | IdeRequest;
 
 type CompileResponse = {
   id: number;
@@ -387,6 +436,16 @@ async function getTypst(
         beforeBuild: [
           withAccessModel(accessModel!),
           withPackageRegistry(packageRegistry),
+          // Editor-intelligence package hints: the exact set of packages the
+          // platform resolves, so import "@..." completion never advertises
+          // an unresolvable package. Tolerates older runtime packages.
+          async (_, { builder }: { builder: Record<string, unknown> }) => {
+            const setCatalog = (builder as { set_package_catalog?: (hints: unknown) => void })
+              .set_package_catalog;
+            if (typeof setCatalog === "function") {
+              setCatalog.call(builder, packageCatalogHints(builtin.catalog));
+            }
+          },
           // Align browser preview with Typst CLI defaults by loading Typst's
           // builtin "text" font asset set (Libertinus/NewCM/DejaVu Mono),
           // then layer the versioned NV font bundle and project fonts on top.
@@ -396,7 +455,7 @@ async function getTypst(
             fetcher: builtin.fontFetcher
           })
         ],
-        getWrapper: () => import("@pku-typst/typst-ts-web-compiler"),
+        getWrapper: () => import("@lcpu/typst-ts-web-compiler"),
         getModule: () => {
           self.postMessage({
             kind: "runtime.status",
@@ -526,6 +585,10 @@ self.onmessage = (event: MessageEvent<WorkerRequest>) => {
     handleMappingRequest(event.data);
     return;
   }
+  if (event.data.kind === "ide.autocomplete" || event.data.kind === "ide.tooltip") {
+    void handleIdeRequest(event.data);
+    return;
+  }
   if (queuedRequest) {
     self.postMessage({
       id: queuedRequest.id,
@@ -586,6 +649,96 @@ function handleMappingRequest(request: TypstMappingRequest) {
       revision,
       error: error instanceof Error ? error.message : "Typst mapping failed"
     } satisfies TypstMappingResponse);
+  }
+}
+
+
+/** The editor-intelligence methods on the raw compiler wasm instance.
+ *  Declared structurally so this worker compiles before the forked package
+ *  exposing these methods is installed. */
+type IdeCompiler = {
+  autocomplete(entryFile: string, file: string, cursor: number, explicit: boolean): unknown;
+  tooltip(entryFile: string, file: string, cursor: number, side: number): unknown;
+};
+
+/** Reaches the raw compiler wasm instance behind the SDK driver. */
+function rawIdeCompiler(compiler: TypstCompiler): IdeCompiler | null {
+  const raw = (compiler as unknown as { compiler?: unknown }).compiler;
+  if (!raw || typeof (raw as IdeCompiler).autocomplete !== "function") return null;
+  return raw as IdeCompiler;
+}
+
+async function handleIdeRequest(request: IdeRequest) {
+  const respond = (payload: Omit<IdeResponse, "kind" | "id">) => {
+    self.postMessage({ kind: "ide.result", id: request.id, ...payload } satisfies IdeResponse);
+  };
+  const typst = typstPromise ? await typstPromise : null;
+  if (!typst || !activeWorkspaceKey || activeWorkspaceKey !== request.workspaceKey) {
+    respond({ ok: false, error: "Typst IDE is not ready" });
+    return;
+  }
+
+  const file = normalizeWorkspacePath(request.file);
+  // A newer request for the same file supersedes this one; drop stale work.
+  latestIdeRequest.set(file, request.id);
+  const superseded = () => latestIdeRequest.get(file) !== request.id;
+
+  try {
+    // Keep the shadow VFS current for the requested buffer. Compiles apply the
+    // whole workspace; a keystroke can outpace the compile debounce, so the
+    // editor always sends the latest content for the file being edited.
+    const paths = [sourcePath(file), file];
+    for (const path of paths) {
+      const previous = shadowFiles.get(path);
+      if (previous?.kind === "source" && previous.value === request.content) continue;
+      await typst.addSource(path, request.content);
+      shadowFiles.set(path, { kind: "source", value: request.content });
+    }
+    if (superseded()) return;
+
+    const compiler = await typst.getCompiler();
+    const ide = rawIdeCompiler(compiler);
+    if (!ide) {
+      respond({ ok: false, error: "Typst IDE is not available" });
+      return;
+    }
+    if (superseded()) return;
+
+    const byteCursor = utf16OffsetToUtf8ByteOffset(request.content, request.cursor);
+    const entryFile = sourcePath(normalizeWorkspacePath(request.entryFilePath || "main.typ"));
+    if (request.kind === "ide.autocomplete") {
+      const raw = ide.autocomplete(entryFile, sourcePath(file), byteCursor, request.explicit);
+      if (superseded()) return;
+      const completion =
+        raw && typeof raw === "object"
+          ? {
+              from: Number((raw as { from: unknown }).from),
+              completions: Array.isArray((raw as { completions: unknown }).completions)
+                ? ((raw as { completions: IdeCompletionItem[] }).completions)
+                : []
+            }
+          : undefined;
+      respond(completion ? { ok: true, completion } : { ok: true });
+      return;
+    }
+    const raw = ide.tooltip(entryFile, sourcePath(file), byteCursor, request.side);
+    if (superseded()) return;
+    const tooltip =
+      raw && typeof raw === "object" && "value" in (raw as object)
+        ? {
+            kind: ((raw as { kind: string }).kind === "code" ? "code" : "text") as
+              | "code"
+              | "text",
+            value: String((raw as { value: unknown }).value)
+          }
+        : undefined;
+    respond(tooltip ? { ok: true, tooltip } : { ok: true });
+  } catch (error) {
+    if (superseded()) return;
+    respond({
+      ok: false,
+      error: error instanceof Error ? error.message : "Typst IDE request failed"
+    });
   }
 }
 

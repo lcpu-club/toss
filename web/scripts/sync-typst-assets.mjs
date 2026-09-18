@@ -13,7 +13,7 @@ const publicRuntimeRoot = path.join(webRoot, "public", "typst-runtime");
 const publicRuntimeManifestPath = path.join(publicRuntimeRoot, "manifest.json");
 const runtimeConfigPath = path.join(webRoot, "typst-runtime.config.json");
 
-const COMPILER_PACKAGE_NAME = "@pku-typst/typst-ts-web-compiler";
+const COMPILER_PACKAGE_NAME = "@lcpu/typst-ts-web-compiler";
 const UPSTREAM_COMPILER_PACKAGE_NAME = "@myriaddreamin/typst-ts-web-compiler";
 const RENDERER_PACKAGE_NAME = "@myriaddreamin/typst-ts-renderer";
 const DEFAULT_TYPST_ASSETS_TAG = "v0.15.0";

@@ -85,3 +85,29 @@
 .connection-warning-row {
   margin: 0;
 }
+
+/* Typst hover tooltips (signature / doc / label info). */
+.typst-hover {
+  max-width: 34rem;
+  max-height: 18rem;
+  overflow: auto;
+  padding: 6px 10px;
+  border: var(--toss-border-width, 1px) solid var(--toss-border-subtle);
+  border-radius: 8px;
+  background: var(--toss-surface);
+  color: var(--toss-text);
+  font-size: var(--toss-font-size-label);
+  line-height: 1.5;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+}
+
+.typst-hover pre.typst-hover-code {
+  margin: 0;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--toss-surface-subtle);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre;
+  overflow: auto;
+}

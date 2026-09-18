@@ -52,6 +52,7 @@ import { useProjectTree } from "@/pages/workspace/hooks/useProjectTree";
 import { useRealtimeDoc } from "@/pages/workspace/hooks/useRealtimeDoc";
 import { useWorkspaceAssetHydration } from "@/pages/workspace/hooks/useWorkspaceAssetHydration";
 import { useWorkspaceCompilation } from "@/pages/workspace/hooks/useWorkspaceCompilation";
+import { useTypstIntelligence } from "@/pages/workspace/hooks/useTypstIntelligence";
 import { useWorkspaceCompileInputs } from "@/pages/workspace/hooks/useWorkspaceCompileInputs";
 import { useWorkspaceFileActions } from "@/pages/workspace/hooks/useWorkspaceFileActions";
 import { useWorkspaceSession } from "@/pages/workspace/hooks/useWorkspaceSession";
@@ -1083,6 +1084,21 @@ function ResolvedWorkspacePage({
   ]);
   const isActiveEditableTextDoc = isActiveTextDoc && activePathIsTextFile;
   const currentEditorLanguage = editorLanguageForPath(activePath);
+  const typstIntelligence = useTypstIntelligence({
+    workspaceKey: compileWorld.scope,
+    entryFilePath: sourceEntryFilePath,
+    activePath,
+    active:
+      currentEditorLanguage === "typst" &&
+      isActiveEditableTextDoc &&
+      !isRevisionMode
+  });
+  // Stable identity across renders unrelated to compilation so the editor's
+  // diagnostics layer is not remapped needlessly.
+  const typstDiagnostics = useMemo(
+    () => (typstIntelligence ? compileDiagnostics : []),
+    [typstIntelligence, compileDiagnostics]
+  );
   const previewPercent = Math.round(previewZoom * 100);
   const activeFileName = activePath.split("/").filter(Boolean).at(-1) || activePath;
   const realtimeRequired = isActiveEditableTextDoc && !isRevisionMode;
@@ -1330,6 +1346,8 @@ function ResolvedWorkspacePage({
               reconnectCountdownText={reconnectCountdownText}
               onReconnectNow={reconnectNow}
               activePathExistsInTree={activePathExistsInTree}
+              typstIntelligence={typstIntelligence}
+              typstDiagnostics={typstDiagnostics}
               editorOverride={assistantEditProposal ? (
                 <AssistantEditReviewPane
                   proposal={assistantEditProposal}

@@ -1,4 +1,6 @@
 import { EditorPane } from "@/components/EditorPane";
+import type { EditorDiagnostic } from "@/lib/editorTypst/diagnostics";
+import type { TypstIntelligenceResponder } from "@/lib/editorTypst/types";
 import { UiBadge, UiButton } from "@/components/ui";
 import "@/pages/workspace/editor.css";
 import { UnsupportedFilePane } from "@/pages/workspace/components/UnsupportedFilePane";
@@ -55,7 +57,9 @@ export function EditorPanel({
   activePathExistsInTree,
   editorOverride,
   panelStyle,
-  t
+  t,
+  typstIntelligence,
+  typstDiagnostics
 }: {
   activePath: string;
   activeFileName: string;
@@ -92,6 +96,17 @@ export function EditorPanel({
   editorOverride: ReactNode;
   panelStyle: CSSProperties;
   t: Translator;
+  /**
+   * Editor intelligence (completion and hover) for Typst documents, resolved
+   * through the browser compiler worker. Stable across diagnostics updates
+   * so the CodeMirror view is not reconfigured on lint refresh.
+   */
+  typstIntelligence?: {
+    responder: TypstIntelligenceResponder;
+    activePath: string;
+  } | null;
+  /** The active file's latest compile diagnostics (lint gutter). */
+  typstDiagnostics?: readonly EditorDiagnostic[] | null;
 }) {
   const collaboratorCount = Math.max(1, collaborators.length);
   const editingSessionCount = Math.max(
@@ -163,6 +178,15 @@ export function EditorPanel({
               remoteCursors={remoteCursors}
               jumpTo={jumpTarget}
               onJumpHandled={onJumpHandled}
+              intelligence={
+                typstIntelligence
+                  ? {
+                      responder: typstIntelligence.responder,
+                      activePath: typstIntelligence.activePath,
+                      diagnostics: typstDiagnostics ?? []
+                    }
+                  : undefined
+              }
             />
           </div>
         ) : (

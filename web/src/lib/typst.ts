@@ -10,6 +10,9 @@ import {
   type TypstRuntimeModule,
   verifyRuntimeModule
 } from "@/lib/typstRuntime";
+import {
+  utf8ByteOffsetToUtf16Offset
+} from "@/lib/typstSync";
 import { CandidateRuntimeScheduler } from "@/lib/candidateRuntime";
 import type { CompilationEnvironment } from "@/compilation/compilationEnvironment";
 import type {
@@ -63,11 +66,39 @@ type WorkerWorkspaceAck = {
   id: number;
 };
 
+type WorkerIdeResponse = {
+  kind: "ide.result";
+  id: number;
+  ok: boolean;
+  completion?: TypstCompletion;
+  tooltip?: TypstHover;
+  error?: string;
+};
+
 type WorkerMessage =
   | WorkerCompileResponse
   | WorkerRuntimeStatus
   | WorkerWorkspaceAck
-  | TypstMappingResponse;
+  | TypstMappingResponse
+  | WorkerIdeResponse;
+
+export type TypstCompletionItem = {
+  kind: string;
+  label: string;
+  apply?: string;
+  detail?: string;
+};
+
+export type TypstCompletion = {
+  /** UTF-16 code unit offset where the replacement begins. */
+  from: number;
+  completions: TypstCompletionItem[];
+};
+
+export type TypstHover = {
+  kind: "text" | "code";
+  value: string;
+};
 
 export type TypstRuntimeStatus = {
   stage: "downloading-compiler" | "downloading-package" | "compiling" | "ready" | "idle";
@@ -116,6 +147,7 @@ type PrewarmOptions = {
 const CJK_TEXT_PATTERN =
   /[\u2e80-\u2eff\u3000-\u303f\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af]/u;
 const MAPPING_REQUEST_TIMEOUT_MS = 2_000;
+const IDE_REQUEST_TIMEOUT_MS = 1_200;
 const WORKER_RESET_ERROR = "Typst worker reset after a fatal compiler failure";
 
 class TypstWorkerRuntime {
@@ -123,6 +155,10 @@ class TypstWorkerRuntime {
   private seq = 1;
   private pending = new Map<number, PendingWorkerRequest>();
   private pendingMappings = new Map<number, PendingMappingRequest>();
+  private pendingIde = new Map<
+    number,
+    { resolve: (response: WorkerIdeResponse) => void; timeout: number }
+  >();
   private listeners = new Set<(status: TypstRuntimeStatus) => void>();
   private acknowledgedSnapshot: WorkspaceSnapshot | null = null;
   private fontIdentities = new WeakMap<Uint8Array, number>();
@@ -153,6 +189,16 @@ class TypstWorkerRuntime {
       pending.resolve(undefined);
     }
     this.pendingMappings.clear();
+    for (const pending of this.pendingIde.values()) {
+      window.clearTimeout(pending.timeout);
+      pending.resolve({
+        kind: "ide.result",
+        id: 0,
+        ok: false,
+        error: "Typst IDE was reset"
+      });
+    }
+    this.pendingIde.clear();
   }
 
   dispose() {
@@ -240,6 +286,14 @@ class TypstWorkerRuntime {
         if (!pending) return;
         window.clearTimeout(pending.timeout);
         this.pendingMappings.delete(response.id);
+        pending.resolve(response);
+        return;
+      }
+      if (response && "kind" in response && response.kind === "ide.result") {
+        const pending = this.pendingIde.get(response.id);
+        if (!pending) return;
+        window.clearTimeout(pending.timeout);
+        this.pendingIde.delete(response.id);
         pending.resolve(response);
         return;
       }
@@ -405,6 +459,86 @@ class TypstWorkerRuntime {
     });
     if (!response?.ok || response.revision !== options.expectedRevision) return undefined;
     return response.location;
+  }
+
+  private requestIde(
+    request:
+      | {
+          kind: "ide.autocomplete";
+          workspaceKey: string;
+          entryFilePath: string;
+          file: string;
+          cursor: number;
+          explicit: boolean;
+          content: string;
+        }
+      | {
+          kind: "ide.tooltip";
+          workspaceKey: string;
+          entryFilePath: string;
+          file: string;
+          cursor: number;
+          side: 0 | 1;
+          content: string;
+        }
+  ): Promise<WorkerIdeResponse | undefined> {
+    const worker = this.ensureWorker();
+    if (!worker) return Promise.resolve(undefined);
+    const id = this.seq++;
+    return new Promise((resolve) => {
+      const timeout = window.setTimeout(() => {
+        this.pendingIde.delete(id);
+        resolve(undefined);
+      }, IDE_REQUEST_TIMEOUT_MS);
+      this.pendingIde.set(id, { resolve, timeout });
+      worker.postMessage({ ...request, id });
+    });
+  }
+
+  async typstAutocomplete(options: {
+    workspaceKey: string;
+    /** The workspace entry file. */
+    entryFilePath: string;
+    file: string;
+    /** UTF-16 code unit offset in the buffer. */
+    cursor: number;
+    explicit: boolean;
+    content: string;
+  }): Promise<TypstCompletion | null> {
+    const response = await this.requestIde({
+      kind: "ide.autocomplete",
+      ...options
+    });
+    if (!response?.ok || !response.completion) return null;
+    const { from, completions } = response.completion;
+    // The wasm returns UTF-8 byte offsets; the editor works in UTF-16 units.
+    return {
+      from: utf8ByteOffsetToUtf16Offset(options.content, from),
+      completions
+    };
+  }
+
+  async typstHover(options: {
+    workspaceKey: string;
+    /** The workspace entry file. */
+    entryFilePath: string;
+    file: string;
+    /** UTF-16 code unit offset in the buffer. */
+    cursor: number;
+    side?: 0 | 1;
+    content: string;
+  }): Promise<TypstHover | null> {
+    const response = await this.requestIde({
+      kind: "ide.tooltip",
+      side: options.side ?? 0,
+      workspaceKey: options.workspaceKey,
+      entryFilePath: options.entryFilePath,
+      file: options.file,
+      cursor: options.cursor,
+      content: options.content
+    });
+    if (!response?.ok || !response.tooltip) return null;
+    return response.tooltip;
   }
 
   prewarm(options: PrewarmOptions): Promise<void> {
@@ -1033,6 +1167,28 @@ export function resolveTypstDocumentToSource(options: {
   position: TypstDocumentPosition;
 }) {
   return runtime.documentToSource(options);
+}
+
+export function typstAutocomplete(options: {
+  workspaceKey: string;
+  entryFilePath: string;
+  file: string;
+  cursor: number;
+  explicit: boolean;
+  content: string;
+}) {
+  return runtime.typstAutocomplete(options);
+}
+
+export function typstHover(options: {
+  workspaceKey: string;
+  entryFilePath: string;
+  file: string;
+  cursor: number;
+  side?: 0 | 1;
+  content: string;
+}) {
+  return runtime.typstHover(options);
 }
 
 export async function renderTypstVectorToCanvas(

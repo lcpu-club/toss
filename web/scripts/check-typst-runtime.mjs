@@ -276,7 +276,7 @@ async function main() {
       withPackageRegistry(new CheckedPackageRegistry(accessModel, packages)),
       loadFonts(fonts, { assets: false })
     ],
-    getWrapper: () => import("@pku-typst/typst-ts-web-compiler"),
+    getWrapper: () => import("@lcpu/typst-ts-web-compiler"),
     getModule: () => ({ module_or_path: compilerWasm })
   });
   await typst.addSource("/main.typ", distribution.template);

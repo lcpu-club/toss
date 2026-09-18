@@ -28,6 +28,12 @@ import { RangeSetBuilder } from "@codemirror/state";
 import { useEffect, useLayoutEffect, useMemo, useRef } from "react";
 import { tags } from "@lezer/highlight";
 import { minimalTextChange } from "@/lib/editorSync";
+import type { EditorDiagnostic } from "@/lib/editorTypst/diagnostics";
+import {
+  setTypstEditorDiagnosticsEffect,
+  typstIntelligenceExtensions
+} from "@/lib/editorTypst/typstEditorExtensions";
+import type { TypstIntelligenceResponder } from "@/lib/editorTypst/types";
 import { createTypstParser } from "@/lib/typstSyntax";
 
 export type EditorChange = {
@@ -160,6 +166,9 @@ const editorChromeTheme = EditorView.theme(
 
 const typstEditorHighlight = HighlightStyle.define([
   { tag: tags.heading, color: "var(--toss-brand-ink)", fontWeight: "700" },
+  // WYSIWYG hints: markup is styled the way its output renders.
+  { tag: tags.emphasis, fontStyle: "italic" },
+  { tag: tags.strong, fontWeight: "700" },
   { tag: tags.comment, color: "var(--toss-text-muted)", fontStyle: "italic" },
   { tag: [tags.string, tags.special(tags.string)], color: "var(--nve-ref-color-green-grass-1100)" },
   { tag: [tags.number, tags.integer, tags.float, tags.bool], color: "var(--nve-ref-color-orange-pumpkin-1100)" },
@@ -233,6 +242,17 @@ type Props = {
   jumpTo?: { line: number; column: number; token: number } | null;
   onJumpHandled?: () => void;
   editorInstanceKey?: string;
+  /**
+   * Editor intelligence (completion, hover, lint) for Typst documents.
+   * `responder` answers engine queries; `diagnostics` are the active
+   * file's latest compile diagnostics.
+   */
+  intelligence?: {
+    responder: TypstIntelligenceResponder;
+    /** Normalized path of the document currently shown (gutter scoping). */
+    activePath: string;
+    diagnostics: readonly EditorDiagnostic[];
+  };
 };
 
 export function EditorPane({
@@ -248,7 +268,8 @@ export function EditorPane({
   remoteCursors = [],
   jumpTo,
   onJumpHandled,
-  editorInstanceKey
+  editorInstanceKey,
+  intelligence
 }: Props) {
   const editorRef = useRef<EditorView | null>(null);
   const onDeltaRef = useRef<Props["onDelta"]>(onDelta);
@@ -370,6 +391,16 @@ export function EditorPane({
     []
   );
 
+  // Keyed on the stable responder (not the wrapper object, which is rebuilt
+  // on parent renders) so lint/diagnostic refreshes never reconfigure the view.
+  const intelligenceResponder = intelligence?.responder;
+  const intelligenceExtensions = useMemo(
+    () =>
+      language === "typst" && intelligenceResponder
+        ? typstIntelligenceExtensions(intelligenceResponder)
+        : [],
+    [intelligenceResponder, language]
+  );
   const extensions = useMemo(() => {
     const languageExtensions =
       language === "typst"
@@ -381,6 +412,7 @@ export function EditorPane({
           : [];
     const base = [
       ...languageExtensions,
+      ...intelligenceExtensions,
       editorChromeTheme,
       cursorListener,
       sourceClickHandler,
@@ -390,7 +422,32 @@ export function EditorPane({
     ];
     if (lineWrap) base.push(EditorView.lineWrapping);
     return base;
-  }, [changeListener, cursorListener, language, lineWrap, saveKeymap, sourceClickHandler, typstLanguage]);
+  }, [
+    changeListener,
+    cursorListener,
+    intelligenceExtensions,
+    language,
+    lineWrap,
+    saveKeymap,
+    sourceClickHandler,
+    typstLanguage
+  ]);
+
+  // Dispatch the active file's diagnostics only when they actually change
+  // (stable array identity / path), so unrelated renders do not remap the lint layer.
+  const intelligenceDiagnostics = intelligence?.diagnostics;
+  const intelligencePath = intelligence?.activePath;
+  useEffect(() => {
+    if (language !== "typst" || !intelligenceDiagnostics) return;
+    const view = editorRef.current;
+    if (!view) return;
+    view.dispatch({
+      effects: setTypstEditorDiagnosticsEffect.of({
+        path: intelligencePath ?? "",
+        diagnostics: intelligenceDiagnostics
+      })
+    });
+  }, [language, intelligenceDiagnostics, intelligencePath]);
 
   useEffect(() => {
     if (language !== "typst") return;
