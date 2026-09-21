@@ -44,10 +44,14 @@ const KIND_TO_TYPE: Record<string, string> = {
 };
 
 /**
- * Typst code is triggered by partial identifiers and by `#`, `@`, and `.`
- * (e.g. `#li`, `@he`, `emoji.`), so the popup follows any of those.
+ * Trigger pattern: a run of characters immediately before the cursor that
+ * may be part of a completion target. This is the liveness-span alphabet
+ * (`typstCompletionValidFor`) plus `#`, where import spans begin at the
+ * string's opening quote and references and dotted accesses contribute
+ * `@` and `.`. The `+` keeps the engine unqueried at positions where no
+ * completion target can start (after whitespace, at line starts, ...).
  */
-const WORD_PATTERN = /[\w.#@-]+$/;
+const WORD_PATTERN = /["\w.#@:/-]+$/;
 
 /**
  * Convert typst-ide snippet syntax into a CodeMirror template. Both dialects
@@ -92,14 +96,26 @@ function toCompletionOption(item: TypstCompletionItem): Completion {
 }
 
 /**
- * Autocompletion backed by the Typst language engine. The engine call is
- * parse-only (no layout), so it runs on every trigger; the completion popup
- * discards stale responses itself.
+ * Liveness predicate for the CodeMirror completion result: the popup stays
+ * open while the text between the engine's completion start and the cursor
+ * still matches it (CodeMirror re-runs the source as soon as it does not).
+ * Import completions are anchored at the string's opening quote, so those
+ * spans start with `"`; every other span is a bare identifier or path
+ * fragment. Any other character (a closing quote, whitespace, punctuation)
+ * invalidates the result so the popup follows the new completion context.
  */
-export function typstCompletionExtension(
+export const typstCompletionValidFor = /^"?[\w.#@:/-]*$/;
+
+/**
+ * The engine-backed completion source. The engine call is parse-only (no
+ * layout), so it runs on every trigger; the completion popup discards stale
+ * responses itself. Exported so tests can drive it with a real
+ * `CompletionContext` without a mounted editor view.
+ */
+export function typstCompletionSource(
   responder: TypstIntelligenceResponder
-): Extension {
-  const source: CompletionSource = async (
+): CompletionSource {
+  return async (
     context: CompletionContext
   ): Promise<Awaited<ReturnType<CompletionSource>>> => {
     if (!context.explicit && !context.matchBefore(WORD_PATTERN)) return null;
@@ -121,10 +137,21 @@ export function typstCompletionExtension(
     return {
       from: Math.max(0, Math.min(result.from, context.pos)),
       options: result.completions.map(toCompletionOption),
-      validFor: /^[\w.#@:-]*$/
+      validFor: typstCompletionValidFor
     };
   };
-  return autocompletion({ override: [source], activateOnTyping: true });
+}
+
+/**
+ * Autocompletion wired to the Typst language engine.
+ */
+export function typstCompletionExtension(
+  responder: TypstIntelligenceResponder
+): Extension {
+  return autocompletion({
+    override: [typstCompletionSource(responder)],
+    activateOnTyping: true
+  });
 }
 
 /** Hover tooltip backed by the Typst language engine (signatures and docs). */
